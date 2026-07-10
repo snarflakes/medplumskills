@@ -42,6 +42,13 @@ curl -X POST /auth/login -d "email=admin@example.com&password=***"
 
 🔴 **Auth rate limiting produces "Invalid password" errors.** Medplum rate-limits at 160 req/min/IP. When rate-limited, the error message says "Invalid password, must be at least 8 characters" even for valid passwords. Wait 60 seconds and retry.
 
+🔴 **You can't get an API token with just `/auth/login`.** The full Medplum auth flow requires PKCE (Proof Key for Code Exchange). The 3-step flow is:
+1. `POST /auth/login` with `code_challenge` + `code_challenge_method=S256` → returns `{code, login}`
+2. `POST /auth/profile` with `{login, code, profile}` → returns new `{code}`
+3. `POST /oauth2/token` with `grant_type=authorization_code`, `code`, and `code_verifier` → returns `{access_token, refresh_token}`
+
+The `code_challenge` (SHA256 of `code_verifier`) must be sent at login. The `code_verifier` must be sent at token exchange. Without PKCE, the token endpoint returns "Missing verification context". For programmatic API access, use the **browser-based admin UI** to log in, or create a `ClientApplication` for server-to-server `client_credentials` flow.
+
 ---
 
 ## The 3 Things That Will Break Your Instance
@@ -136,6 +143,7 @@ Medplum recommends `PlanDefinition + Questionnaire + $apply` for structured visi
 | "Profile not found" after login | Corrupted indexed columns from DB edits | Rebuild from Super Admin, or fresh stack reset |
 | "Invalid password" for valid password | Auth rate limiting (160 req/min) | Wait 60 seconds |
 | "Generating temporary signing key" | Redis flush lost JWT signing key | Restart server, re-login |
+| "Missing verification context" at `/oauth2/token` | PKCE code_challenge not sent during `/auth/login` | Send `code_challenge` and `code_challenge_method=S256` at login, then `code_verifier` at token exchange |
 | 403 on resource creation | AccessPolicy missing resourceType | Add resourceType to policy via API |
 | Provider app blank/won't load | `MEDPLUM_BASE_URL` mismatch | Rebuild Provider app with correct URL |
 | CORS errors | App and API on different origins | Use nginx reverse proxy on same origin |
