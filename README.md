@@ -19,6 +19,25 @@ Every pitfall documented here was learned by breaking things on a real deploymen
 6. **AccessPolicy circular lockout is real** — if your policy restricts AccessPolicy writes, you can't update it
 7. **Auth rate limiting looks like "Invalid password"** — wait 60 seconds between testing bursts
 8. **A SOAP note is a transaction Bundle, not a single resource** — 6-8 FHIR resources linked together
+9. **`client_credentials` needs a ProjectMembership** — a ClientApplication alone returns "Invalid client"; you must also create a ProjectMembership linking it to a project
+10. **`/auth/profile` takes a ProjectMembership ID, not a Practitioner ID** — if only one membership exists, it's auto-selected (skip this step)
+11. **`client_id` is the ClientApplication resource ID** — not a separate field
+
+## Auth for Agentic Workflows
+
+Agents need two auth paths to interact with Medplum:
+
+### 1. PKCE Flow (browser-based / human-in-the-loop)
+For interactive sessions where a human logs in. The Provider app uses this automatically. Agents can use it too — generate a `code_verifier`/`code_challenge` pair, call `/auth/login` with `projectId`, then exchange the code at `/oauth2/token` for a bearer token. Tokens expire in 1 hour.
+
+### 2. `client_credentials` Flow (machine-to-machine / autonomous agents)
+For headless API access — no browser, no human. Requires **three** resources, not just a ClientApplication:
+
+1. **ClientApplication** — `grantType: ["client_credentials"]`, `pkceOptional: true`, set a `secret`
+2. **ProjectMembership** — links the ClientApplication to your project (`admin: true` for full access)
+3. **Token exchange** — `POST /oauth2/token` with `grant_type=client_credentials`, `client_id=<ClientApplication-ID>`, `client_secret=<secret>`
+
+⚠️ Without the ProjectMembership, you get "Invalid client" — and this is **not documented** in Medplum's client-credentials guide.
 
 ## Use as an OpenClaw Skill
 
