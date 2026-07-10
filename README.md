@@ -1,33 +1,24 @@
 # medplumskills 🏥
 
-AI agent skills and operational guides for self-hosting [Medplum](https://www.medplum.com/) — the open-source healthcare development platform.
+Self-hosted Medplum knowledge for AI agents — the things stock LLMs get wrong about deploying, configuring, and debugging Medplum FHIR infrastructure.
 
-Built from real-world experience deploying, configuring, and debugging Medplum on a Raspberry Pi. Every pitfall documented here was learned the hard way.
+Built from real-world experience deploying Medplum on a Raspberry Pi. Every pitfall documented here was learned by breaking things.
 
-## What's Inside
+## What's Here
 
-| File | Description |
-|------|-------------|
-| [`SKILL.md`](./SKILL.md) | Complete self-hosting guide — architecture, auth, AccessPolicy, Provider app deployment, pitfalls, troubleshooting |
+Each skill is a standalone markdown file. Give any URL to your AI agent — it reads it and instantly corrects its Medplum knowledge.
 
-## Quick Links
+**https://github.com/snarflakes/medplumskills/blob/main/SKILL.md** ← table of contents
 
-- **[Full Self-Hosting Guide →](./SKILL.md)** — Start here
-- **[Hard-Learned Pitfalls →](./SKILL.md#⚠️-hard-learned-pitfalls)** — Don't skip this section
-- **[AccessPolicy Reference →](./SKILL.md#accesspolicy)** — Role-based access control for clinicians, admins, and patients
-- **[Troubleshooting Table →](./SKILL.md#troubleshooting)** — Symptom → Cause → Fix
-
-## Key Takeaways
-
-1. **Never modify FHIR tables directly in PostgreSQL** — Medplum maintains indexed columns that break silently when bypassed
-2. **Never `FLUSHALL` Redis in production** — It destroys JWT signing keys and breaks auth for all users
-3. **Project-scoped users need `projectId` at login** — Without it, they get "User not found"
-4. **`MEDPLUM_BASE_URL` is baked into the Provider app build** — Rebuild when the URL changes
-5. **Self-hosted has no email service** — Use `/auth/setpassword` or Super Admin UI for passwords
+| Skill | What LLMs Get Wrong |
+|-------|---------------------|
+| [Deploy](deploy/SKILL.md) | `command: ["env"]` is intentional, `MEDPLUM_BASE_URL` is build-time not runtime, demo recaptcha keys don't work |
+| [Auth](auth/SKILL.md) | Project-scoped users get "User not found" without `projectId`, AccessPolicy circular lockouts, no email in self-hosted |
+| [Pitfalls](pitfalls/SKILL.md) | Direct DB edits corrupt indexes, Redis FLUSHALL destroys auth, rate limiting looks like "Invalid password" |
+| [Clinical](clinical/SKILL.md) | SOAP notes are transaction Bundles not single resources, DoseSpot is paid, `urn:uuid:` for Bundle references |
+| [Troubleshooting](troubleshooting/SKILL.md) | Symptom → Cause → Fix table for every error we've hit |
 
 ## Use as an OpenClaw Skill
-
-If you're running [OpenClaw](https://github.com/openclaw/openclaw), you can install this as a skill:
 
 ```bash
 openclaw skill add snarflakes/medplumskills
@@ -35,9 +26,31 @@ openclaw skill add snarflakes/medplumskills
 
 Or reference `SKILL.md` directly in your agent's workspace.
 
+## Use as a Claude / Cursor Skill
+
+Add to your project's `CLAUDE.md` or `AGENTS.md`:
+```
+SKILL.md
+```
+
+Point to the root or any sub-skill:
+- `https://github.com/snarflakes/medplumskills/blob/main/SKILL.md`
+- `https://github.com/snarflakes/medplumskills/blob/main/pitfalls/SKILL.md`
+
+## Key Takeaways
+
+1. **Never modify FHIR tables directly in PostgreSQL** — breaks indexing silently
+2. **Never `FLUSHALL` Redis in production** — destroys JWT signing keys, breaks auth
+3. **Project-scoped users need `projectId` at login** — #1 cause of "User not found"
+4. **`MEDPLUM_BASE_URL` is baked into the Provider app build** — rebuild when URL changes
+5. **Self-hosted has no email server** — use `/auth/setpassword` for passwords
+6. **AccessPolicy circular lockout is real** — if your policy restricts AccessPolicy writes, you can't update it
+7. **Auth rate limiting looks like "Invalid password"** — wait 60 seconds between testing bursts
+8. **A SOAP note is a transaction Bundle, not a single resource** — 6-8 FHIR resources linked together
+
 ## License
 
-MIT — see [LICENSE](./LICENSE)
+MIT — see [LICENSE](LICENSE)
 
 ---
 
