@@ -422,23 +422,49 @@ Project-scoped practitioners need their project ID included in the login request
 
 Self-hosted Provider app login fails for **three** distinct reasons that all need to be fixed:
 
-#### 1. Missing `?project=` URL parameter
+#### 1. Project-scoped users need `projectId` in the login request — and it's NOT passed through
 
-Project-scoped users (practitioners, patients) **require** `projectId` in the login request. The Provider app reads `projectId` from `window.location.search` (URL `?project=` param), NOT from the MedplumClient constructor config.
+Project-scoped users (practitioners, patients) **require** `projectId` in the `/auth/login` request. The Provider app reads `projectId` from `window.location.search` (URL `?project=` param) via `useSearchParams()`, NOT from the MedplumClient constructor config (`MEDPLUM_PROJECT_ID` env var).
 
-**Fix**: Inject a `<script>` as the **first element in `<head>`** of `index.html` that adds `?project=<projectId>` to the URL if missing:
+**Why the URL redirect script alone doesn't work**: The Provider app's MedplumClient has `onUnauthenticated: () => window.location.href = '/'` which fires when no active session is found, redirecting to `/` and **stripping all query parameters including `?project=`**. Even `window.history.replaceState()` (which updates the URL without navigation) doesn't survive this — by the time the sign-in form reads the URL params, `onUnauthenticated` has already redirected.
+
+**The real fix**: Patch the Provider app's JS bundle to make `startLogin()` include `projectId` from the constructor config as a fallback. This way, even if URL params are lost, the project ID is always in the login request.
+
+In the Provider app's entrypoint script, add this `sed` patch (runs after Vite placeholder substitution):
+
+```bash
+# Patch startLogin to include projectId from constructor config as fallback
+if [ -n "$MEDPLUM_PROJECT_ID" ]; then
+  sed -i 's|clientId:e.clientId??this.clientId,scope:e.scope|clientId:e.clientId??this.clientId,projectId:e.projectId??this.options.projectId,scope:e.scope|' /usr/share/nginx/html/assets/*.js
+fi
+```
+
+This changes `startLogin` from:
+```javascript
+startLogin(e,t){return this.post('auth/login',{...await this.ensureCodeChallenge(e),clientId:e.clientId??this.clientId,scope:e.scope},void 0,t)}
+```
+To:
+```javascript
+startLogin(e,t){return this.post('auth/login',{...await this.ensureCodeChallenge(e),clientId:e.clientId??this.clientId,projectId:e.projectId??this.options.projectId,scope:e.scope},void 0,t)}
+```
+
+Now `projectId` falls back to `this.options.projectId` (the `MEDPLUM_PROJECT_ID` env var baked into the constructor) when not passed from the URL.
+
+**Optional URL redirect script**: You can also inject a `<script>` as the **first element in `<head>`** of `index.html` to add `?project=<projectId>` to the URL for bookmarkability:
 
 ```html
 <script>
 if (!new URLSearchParams(window.location.search).get('project')) {
   var u = new URL(window.location);
   u.searchParams.set('project', 'YOUR_PROJECT_ID');
-  window.history.replaceState(null, '', u.toString());
+  window.location.replace(u.toString()); // use location.replace, NOT replaceState
 }
 </script>
 ```
 
-⚠️ The script MUST be the first element in `<head>`, before the React module script. If placed after, React reads `window.location.search` before the redirect fires.
+⚠️ Use `window.location.replace()` (full page reload), NOT `window.history.replaceState()` — `replaceState` updates the URL bar but the `onUnauthenticated` redirect strips query params before React can read them.
+
+⚠️ The redirect script alone is NOT sufficient — you also need the JS bundle patch. The redirect helps with UX (bookmarkable URL), but the `startLogin` patch ensures `projectId` is always included in the login request regardless of URL state.
 
 #### 2. MEDPLUM_CLIENT_ID should be EMPTY
 
@@ -475,17 +501,21 @@ location /oauth2/ {
 
 1. ✅ Build Provider app Docker image with correct `MEDPLUM_BASE_URL` (pointing to Medplum **server**, not Provider app itself)
 2. ✅ Set `MEDPLUM_CLIENT_ID=` (empty) in docker-compose env vars
-3. ✅ Inject `?project=<projectId>` redirect script as **first element** in `<head>` of `index.html`
-4. ✅ Add `/oauth2/` location block to nginx reverse proxy config
-5. ✅ Set `Practitioner.active = true` for all practitioners
-6. ✅ Test login for both super-admin and project-scoped users
+3. ✅ Set `MEDPLUM_PROJECT_ID` to your project ID (used by the startLogin patch)
+4. ✅ Patch `startLogin` in JS bundle to include `projectId:e.projectId??this.options.projectId` fallback
+5. ✅ Add `/oauth2/` location block to nginx reverse proxy config
+6. ✅ Set `Practitioner.active = true` for all practitioners
+7. ✅ Test login for both super-admin and project-scoped users
 
-### MedplumClient does NOT store projectId
+### MedplumClient does NOT pass projectId to login by default
 
-The `MedplumClient` constructor accepts `{baseUrl, clientId, projectId}` but only stores `clientId` — `projectId` is NOT used in the login flow. The Provider app reads `projectId` exclusively from the URL `?project=` parameter via `searchParams.get('project')`.
+The `MedplumClient` constructor accepts `{baseUrl, clientId, projectId}` but the `startLogin` method does NOT include `projectId` from the constructor config. It only sends `projectId` if explicitly passed in the login input object. The Provider app reads `projectId` from URL `?project=` params via `useSearchParams()`, but this can be lost due to the `onUnauthenticated` redirect.
+
+The patch adds `projectId:e.projectId??this.options.projectId` to `startLogin`, ensuring the constructor config's `projectId` (from `MEDPLUM_PROJECT_ID` env var) is always included as a fallback.
 
 ### How the Provider app's startLogin works
 
+**Before patch** (original):
 ```javascript
 // Simplified from the Provider app JS bundle:
 startLogin(input) {
@@ -497,7 +527,25 @@ startLogin(input) {
 }
 ```
 
+**After patch** (with projectId fallback):
+```javascript
+startLogin(input) {
+  return this.post('auth/login', {
+    ...await this.ensureCodeChallenge(input),  // adds PKCE params
+    clientId: input.clientId ?? this.clientId,  // uses instance clientId if not provided
+    projectId: input.projectId ?? this.options.projectId,  // FALLBACK to constructor config
+    scope: input.scope                           // always 'openid'
+  });
+}
+```
+
 When `clientId` is empty, the login proceeds as email/password + PKCE without OAuth2 client validation.
+
+### ⚠️ Why URL redirect scripts alone don't work
+
+The Provider app's MedplumClient has `onUnauthenticated: () => window.location.href = '/'`. When no active session is found, this fires and redirects to `/` — **stripping all query parameters including `?project=`**. Even a `window.history.replaceState()` in `<head>` (before React loads) gets overridden by this redirect. The only reliable fix is patching `startLogin` in the JS bundle to always include `projectId`.
+
+A `window.location.replace()` redirect script is useful for UX (bookmarkable URL with `?project=`), but the JS bundle patch is the actual fix that ensures `projectId` reaches the login API call.
 
 ## ⚠️ Hard-Learned Pitfalls
 
@@ -652,8 +700,8 @@ Set in Project settings (requires Super Admin):
 | 403 Forbidden on resource writes | AccessPolicy too restrictive | Update AccessPolicy via API (not DB!) |
 | Provider app won't load | Wrong MEDPLUM_BASE_URL | Rebuild Provider app with correct URL |
 | Provider login "glitches and resets" | `/oauth2/` not proxied through nginx | Add `/oauth2/` location block to nginx config |
-| Provider login "User not found" (project-scoped) | Missing `?project=` URL param | Inject redirect script in index.html |
-| Provider token exchange "Invalid client" | `MEDPLUM_CLIENT_ID` set with mismatched redirectUri | Remove `MEDPLUM_CLIENT_ID` or fix ClientApplication redirectUri |
+| Provider login "User not found" (project-scoped) | `projectId` not included in login request | Patch `startLogin` in JS bundle to add `projectId:e.projectId??this.options.projectId` fallback |
+| Provider token exchange "Invalid client" | `MEDPLUM_CLIENT_ID` set with mismatched redirectUri | Remove `MEDPLUM_CLIENT_ID` (empty) or fix ClientApplication redirectUri |
 | Can't create Secret resource | 400 Bad Request | Secrets may need special handling — check server config |
 | DoseSpot "Access Check Failed" | Expected — paid integration | Not available in self-hosted without license |
 | Invite email not sent | No SMTP configured | Use Force Set Password or /auth/setpassword |
