@@ -416,6 +416,89 @@ Project-scoped practitioners need their project ID included in the login request
 2. The AccessPolicy attached to the membership is correct
 3. The user is project-scoped (`project` field is set on the User resource)
 
+## Provider App Self-Hosted Login
+
+### The Three Login Gotchas
+
+Self-hosted Provider app login fails for **three** distinct reasons that all need to be fixed:
+
+#### 1. Missing `?project=` URL parameter
+
+Project-scoped users (practitioners, patients) **require** `projectId` in the login request. The Provider app reads `projectId` from `window.location.search` (URL `?project=` param), NOT from the MedplumClient constructor config.
+
+**Fix**: Inject a `<script>` as the **first element in `<head>`** of `index.html` that adds `?project=<projectId>` to the URL if missing:
+
+```html
+<script>
+if (!new URLSearchParams(window.location.search).get('project')) {
+  var u = new URL(window.location);
+  u.searchParams.set('project', 'YOUR_PROJECT_ID');
+  window.history.replaceState(null, '', u.toString());
+}
+</script>
+```
+
+⚠️ The script MUST be the first element in `<head>`, before the React module script. If placed after, React reads `window.location.search` before the redirect fires.
+
+#### 2. MEDPLUM_CLIENT_ID should be EMPTY
+
+If `MEDPLUM_CLIENT_ID` is set, the Provider app uses **OAuth2 authorization-code flow**, which requires:
+- A ClientApplication resource with matching `redirectUri`
+- The `redirectUri` registered on the ClientApplication must match what the app sends
+
+The Provider app sends `window.location.origin` as `redirect_uri` (e.g., `http://192.168.1.131:3001`), but if the ClientApplication has `redirectUri` set to `http://192.168.1.131:3001/oauth2/callback`, they **don't match** → "Invalid client" error on token exchange.
+
+**Fix**: Set `MEDPLUM_CLIENT_ID=` (empty) in the Provider app's environment. Without it, the app uses **direct email/password login with PKCE** — simpler and works without client validation.
+
+If you must use a ClientApplication (e.g., for `pkceOptional: true`), ensure its `redirectUri` matches what the Provider app sends.
+
+#### 3. Nginx must proxy `/oauth2/` to the Medplum server
+
+The Provider app's `MEDPLUM_BASE_URL` points to the nginx reverse proxy (e.g., `http://192.168.1.131/`). When the app exchanges the PKCE auth code for a token, it calls `POST /oauth2/token` against this URL.
+
+If nginx doesn't have a `/oauth2/` location block, the request falls through to the catch-all `/` → proxied to the Medplum App (port 3000) → **405 Not Allowed**.
+
+**Fix**: Add `/oauth2/` to your nginx config:
+
+```nginx
+location /oauth2/ {
+    proxy_pass http://localhost:8103;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+### Provider App Deployment Checklist
+
+1. ✅ Build Provider app Docker image with correct `MEDPLUM_BASE_URL` (pointing to Medplum **server**, not Provider app itself)
+2. ✅ Set `MEDPLUM_CLIENT_ID=` (empty) in docker-compose env vars
+3. ✅ Inject `?project=<projectId>` redirect script as **first element** in `<head>` of `index.html`
+4. ✅ Add `/oauth2/` location block to nginx reverse proxy config
+5. ✅ Set `Practitioner.active = true` for all practitioners
+6. ✅ Test login for both super-admin and project-scoped users
+
+### MedplumClient does NOT store projectId
+
+The `MedplumClient` constructor accepts `{baseUrl, clientId, projectId}` but only stores `clientId` — `projectId` is NOT used in the login flow. The Provider app reads `projectId` exclusively from the URL `?project=` parameter via `searchParams.get('project')`.
+
+### How the Provider app's startLogin works
+
+```javascript
+// Simplified from the Provider app JS bundle:
+startLogin(input) {
+  return this.post('auth/login', {
+    ...await this.ensureCodeChallenge(input),  // adds PKCE params
+    clientId: input.clientId ?? this.clientId,  // uses instance clientId if not provided
+    scope: input.scope                           // always 'openid'
+  });
+}
+```
+
+When `clientId` is empty, the login proceeds as email/password + PKCE without OAuth2 client validation.
+
 ## ⚠️ Hard-Learned Pitfalls
 
 ### 1. Never modify FHIR resource tables directly in PostgreSQL
@@ -568,6 +651,9 @@ Set in Project settings (requires Super Admin):
 | "Generating temporary signing key" | Redis flush lost signing key | Restart server; re-login |
 | 403 Forbidden on resource writes | AccessPolicy too restrictive | Update AccessPolicy via API (not DB!) |
 | Provider app won't load | Wrong MEDPLUM_BASE_URL | Rebuild Provider app with correct URL |
+| Provider login "glitches and resets" | `/oauth2/` not proxied through nginx | Add `/oauth2/` location block to nginx config |
+| Provider login "User not found" (project-scoped) | Missing `?project=` URL param | Inject redirect script in index.html |
+| Provider token exchange "Invalid client" | `MEDPLUM_CLIENT_ID` set with mismatched redirectUri | Remove `MEDPLUM_CLIENT_ID` or fix ClientApplication redirectUri |
 | Can't create Secret resource | 400 Bad Request | Secrets may need special handling — check server config |
 | DoseSpot "Access Check Failed" | Expected — paid integration | Not available in self-hosted without license |
 | Invite email not sent | No SMTP configured | Use Force Set Password or /auth/setpassword |
