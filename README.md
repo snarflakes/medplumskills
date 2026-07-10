@@ -13,7 +13,7 @@ Every pitfall documented here was learned by breaking things on a real deploymen
 
 1. **Never modify FHIR tables directly in PostgreSQL** — breaks indexing silently
 2. **Never `FLUSHALL` Redis in production** — destroys JWT signing keys, breaks auth
-3. **Project-scoped users need `projectId` at login** — #1 cause of "User not found"
+3. **Project-scoped users need `projectId` at login** — #1 cause of "User not found"; the Provider app's `MedplumClient.startLogin()` doesn't include `projectId` from constructor config — you must patch the JS bundle to add `projectId:e.projectId??this.options.projectId` as a fallback
 4. **`MEDPLUM_BASE_URL` is baked into the Provider app build** — rebuild when URL changes
 5. **Self-hosted has no email server** — use `/auth/setpassword` for passwords
 6. **AccessPolicy circular lockout is real** — if your policy restricts AccessPolicy writes, you can't update it
@@ -22,6 +22,9 @@ Every pitfall documented here was learned by breaking things on a real deploymen
 9. **`client_credentials` needs a ProjectMembership** — a ClientApplication alone returns "Invalid client"; you must also create a ProjectMembership linking it to a project
 10. **`/auth/profile` takes a ProjectMembership ID, not a Practitioner ID** — if only one membership exists, it's auto-selected (skip this step)
 11. **`client_id` is the ClientApplication resource ID** — not a separate field
+12. **Provider app `onUnauthenticated` strips `?project=` URL params** — it redirects to `/`, losing all query parameters; a URL redirect script alone doesn't fix this — you must patch `startLogin` in the JS bundle
+13. **Self-hosted Provider app needs nginx `/oauth2/` proxy** — otherwise PKCE token exchange returns 405
+14. **Self-hosted Provider app needs `MEDPLUM_CLIENT_ID=` (empty)** — with it set, the app uses OAuth2 authorization-code flow which requires a matching `redirectUri` on the ClientApplication
 
 ## Auth for Agentic Workflows
 
